@@ -14,6 +14,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
+from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils import math as math_utils
 
@@ -24,6 +25,9 @@ class G1ReachEnv(DirectRLEnv):
     cfg: G1ReachEnvCfg
 
     def __init__(self, cfg: G1ReachEnvCfg, render_mode: str | None = None, **kwargs):
+        self._contact_sensor: ContactSensor | None = None
+        self._feet_sensor_body_ids: list[int] = []
+        self._feet_body_ids: list[int] = []
         super().__init__(cfg, render_mode, **kwargs)
 
         # robot handles
@@ -36,20 +40,35 @@ class G1ReachEnv(DirectRLEnv):
                 f"does not match articulation DOF count ({self.num_dof})."
             )
 
-        self.joint_pos = self.robot.data.joint_pos
-        self.joint_vel = self.robot.data.joint_vel
-
         joint_limits = self.robot.data.soft_joint_pos_limits[0]
         self.joint_lower_limits = joint_limits[:, 0]
         self.joint_upper_limits = joint_limits[:, 1]
+        self.joint_range = torch.clamp(self.joint_upper_limits - self.joint_lower_limits, min=1e-3)
         self.default_joint_pos = self.robot.data.default_joint_pos.clone()
-
-        self.root_state = self.robot.data.root_state_w
-        self.lin_vel = self.robot.data.root_lin_vel_w
-        self.ang_vel = self.robot.data.root_ang_vel_w
-        self.root_quat = self.robot.data.root_quat_w
+        self.default_joint_pos_ref = self.default_joint_pos[0].clone()
 
         self.prev_actions = torch.zeros((self.num_envs, self.num_dof), dtype=torch.float32, device=self.device)
+
+        def build_group(patterns: list[str]) -> torch.Tensor:
+            ids = self._collect_joint_indices(patterns)
+            if len(ids) == 0:
+                return torch.empty(0, dtype=torch.long, device=self.device)
+            return torch.tensor(ids, dtype=torch.long, device=self.device)
+
+        self._joint_groups = {
+            "hip": build_group([".*_hip_yaw_joint", ".*_hip_roll_joint"]),
+            "arms": build_group(
+                [
+                    ".*_shoulder_pitch_joint",
+                    ".*_shoulder_roll_joint",
+                    ".*_shoulder_yaw_joint",
+                    ".*_elbow_joint",
+                ]
+            ),
+            "fingers": build_group([".*_hand_.*", ".*_thumb_.*"]),
+            "torso": build_group(["waist_.*_joint"]),
+        }
+        self._ankle_joint_ids = build_group([".*_ankle_pitch_joint", ".*_ankle_roll_joint"])
         self.smooth_joint_targets = self.default_joint_pos.clone()
 
         self.target_pos = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -64,6 +83,17 @@ class G1ReachEnv(DirectRLEnv):
         self._env_z = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat((self.num_envs, 1))
         self._env_x = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat((self.num_envs, 1))
         self._hand_forward_local = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat((self.num_envs, 1))
+        self._contact_sensor = self.scene.sensors.get("contact_sensor")
+        if self.cfg.contact_sensor is not None and self._contact_sensor is None:
+            raise RuntimeError("Contact sensor failed to initialize despite being requested in the config.")
+        if self._contact_sensor is not None:
+            feet_sensor_ids, _ = self._contact_sensor.find_bodies(".*_ankle_roll_link")
+            self._feet_sensor_body_ids = feet_sensor_ids
+        feet_body_ids, _ = self.robot.find_bodies(".*_ankle_roll_link")
+        self._feet_body_ids = feet_body_ids
+        self._has_foot_feedback = (
+            self._contact_sensor is not None and len(self._feet_sensor_body_ids) > 0 and len(self._feet_body_ids) > 0
+        )
 
     #
     # Implementation of DirectRLEnv abstract methods.
@@ -79,6 +109,9 @@ class G1ReachEnv(DirectRLEnv):
             self.scene.filter_collisions(global_prim_paths=[])
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
+        if self.cfg.contact_sensor is not None:
+            self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+            self.scene.sensors["contact_sensor"] = self._contact_sensor
         # lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2700.0, color=(0.9, 0.9, 0.9))
         light_cfg.func("/World/Light", light_cfg)
@@ -93,11 +126,10 @@ class G1ReachEnv(DirectRLEnv):
             self.cfg.action_smoothing * self.smooth_joint_targets + (1.0 - self.cfg.action_smoothing) * desired
         )
         self.robot.set_joint_position_target(self.smooth_joint_targets, joint_ids=self._dof_ids)
-        self.prev_actions[:] = self.actions
 
     def _get_observations(self) -> dict:
-        root_pos = self.root_state[:, :3]
-        root_quat = self.root_quat
+        root_pos = self.robot.data.root_pos_w
+        root_quat = self.robot.data.root_quat_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
         hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
 
@@ -115,7 +147,9 @@ class G1ReachEnv(DirectRLEnv):
         hand_forward = math_utils.quat_apply(hand_quat, self._hand_forward_local)
         hand_facing = torch.sum(math_utils.normalize(hand_forward) * math_utils.normalize(to_target_hand), dim=-1)
 
-        joint_pos_normalized = torch_utils_scale(self.joint_pos, self.joint_lower_limits, self.joint_upper_limits)
+        joint_pos = self.robot.data.joint_pos
+        joint_vel = self.robot.data.joint_vel
+        joint_pos_normalized = torch_utils_scale(joint_pos, self.joint_lower_limits, self.joint_upper_limits)
 
         roll, pitch, yaw = math_utils.euler_xyz_from_quat(root_quat)
         euler = torch.stack((roll, pitch, yaw), dim=-1)
@@ -123,13 +157,13 @@ class G1ReachEnv(DirectRLEnv):
         obs = torch.cat(
             (
                 root_pos[:, 2:3],
-                self.lin_vel * self.cfg.lin_vel_scale,
-                self.ang_vel * self.cfg.ang_vel_scale,
+                self.robot.data.root_lin_vel_w * self.cfg.lin_vel_scale,
+                self.robot.data.root_ang_vel_w * self.cfg.ang_vel_scale,
                 euler,
                 up_proj.unsqueeze(-1),
                 facing.unsqueeze(-1),
                 joint_pos_normalized,
-                self.joint_vel * self.cfg.dof_vel_scale,
+                joint_vel * self.cfg.dof_vel_scale,
                 self.prev_actions,
                 to_target_root,
                 to_target_hand,
@@ -142,8 +176,9 @@ class G1ReachEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        root_pos = self.root_state[:, :3]
-        root_quat = self.root_quat
+        root_pos = self.robot.data.root_pos_w
+        root_quat = self.robot.data.root_quat_w
+        root_lin_vel = self.robot.data.root_lin_vel_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
 
         to_target_root = self.target_pos - root_pos
@@ -153,13 +188,53 @@ class G1ReachEnv(DirectRLEnv):
         body_dist = torch.linalg.norm(to_target_root[:, :2], dim=-1)
 
         dir_to_target = math_utils.normalize(to_target_root)
+        dir_to_target_xy = to_target_root[:, :2]
+        dir_to_target_xy_norm = torch.linalg.norm(dir_to_target_xy, dim=-1, keepdim=True).clamp_min(1e-4)
+        dir_to_target_xy_unit = dir_to_target_xy / dir_to_target_xy_norm
         heading_vec = math_utils.normalize(math_utils.quat_apply(root_quat, self._env_x))
         facing = torch.sum(heading_vec * dir_to_target, dim=-1)
 
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         upright = up_vec[:, 2]
 
+        desired_speed = torch.clamp(body_dist, max=self.cfg.target_velocity_max_cmd)
+        actual_speed_along_dir = torch.sum(root_lin_vel[:, :2] * dir_to_target_xy_unit, dim=-1)
+        target_velocity_error = desired_speed - actual_speed_along_dir
+        move_mask = desired_speed > self.cfg.feet_air_time_command_threshold
+        feet_air_time_metric, feet_slide_metric = self._compute_foot_metrics(move_mask)
+
         success = (hand_dist < self.cfg.reach_threshold) & (facing > self.cfg.success_heading_threshold)
+
+        joint_pos = self.robot.data.joint_pos
+
+        def group_dev(indices: torch.Tensor):
+            if indices.numel() == 0:
+                return torch.zeros(self.num_envs, device=self.device)
+            return torch.sum(
+                torch.abs(joint_pos[:, indices] - self.default_joint_pos_ref[indices]) / self.joint_range[indices],
+                dim=-1,
+            )
+
+        joint_dev_total = torch.sum(
+            torch.abs(joint_pos - self.default_joint_pos_ref) / self.joint_range,
+            dim=-1,
+        )
+        hip_dev = group_dev(self._joint_groups["hip"])
+        arms_dev = group_dev(self._joint_groups["arms"])
+        fingers_dev = group_dev(self._joint_groups["fingers"])
+        torso_dev = group_dev(self._joint_groups["torso"])
+
+        if self._ankle_joint_ids.numel() > 0:
+            ankle_pos = joint_pos[:, self._ankle_joint_ids]
+            ankle_low = self.joint_lower_limits[self._ankle_joint_ids] + 0.02
+            ankle_high = self.joint_upper_limits[self._ankle_joint_ids] - 0.02
+            ankle_violation = torch.clamp(ankle_pos - ankle_high, min=0.0) + torch.clamp(ankle_low - ankle_pos, min=0.0)
+            ankle_limit_metric = ankle_violation.sum(dim=-1)
+        else:
+            ankle_limit_metric = torch.zeros(self.num_envs, device=self.device)
+
+        action_rate = torch.sum((self.actions - self.prev_actions) ** 2, dim=-1)
+        roll, pitch, _ = math_utils.euler_xyz_from_quat(root_quat)
 
         reward = compute_rewards(
             self.cfg.rew_scale_alive,
@@ -167,15 +242,38 @@ class G1ReachEnv(DirectRLEnv):
             self.cfg.rew_scale_body_target,
             self.cfg.rew_scale_facing,
             self.cfg.rew_scale_upright,
+            self.cfg.rew_scale_target_velocity,
             self.cfg.rew_scale_action_rate,
             self.cfg.rew_scale_joint_vel,
+            self.cfg.rew_scale_flat_orientation,
+            self.cfg.rew_scale_joint_center,
+            self.cfg.rew_scale_action_smooth,
+            self.cfg.rew_scale_joint_hip,
+            self.cfg.rew_scale_joint_arms,
+            self.cfg.rew_scale_joint_fingers,
+            self.cfg.rew_scale_joint_torso,
+            self.cfg.rew_scale_ankle_limits,
+            self.cfg.rew_scale_feet_air_time,
+            self.cfg.rew_scale_feet_slide,
+            self.cfg.rew_scale_termination,
             self.cfg.success_bonus,
             hand_dist,
             body_dist,
             facing,
             upright,
+            torch.abs(roll) + torch.abs(pitch),
+            target_velocity_error,
+            self.cfg.target_velocity_tracking_std,
             self.actions,
-            self.joint_vel,
+            self.robot.data.joint_vel,
+            hip_dev,
+            arms_dev,
+            fingers_dev,
+            torso_dev,
+            ankle_limit_metric,
+            feet_air_time_metric,
+            feet_slide_metric,
+            action_rate,
             success,
             self.reset_terminated,
         )
@@ -196,23 +294,51 @@ class G1ReachEnv(DirectRLEnv):
         upright_reward = self.cfg.rew_scale_upright * torch.clamp(upright, min=0.0)
         alive_reward = self.cfg.rew_scale_alive * (1.0 - self.reset_terminated.float())
         action_penalty = self.cfg.rew_scale_action_rate * torch.sum(self.actions**2, dim=-1)
-        joint_vel_penalty = self.cfg.rew_scale_joint_vel * torch.sum(self.joint_vel**2, dim=-1)
+        joint_vel_penalty = self.cfg.rew_scale_joint_vel * torch.sum(self.robot.data.joint_vel**2, dim=-1)
         success_reward = self.cfg.success_bonus * success.float()
+        target_velocity_reward = self.cfg.rew_scale_target_velocity * torch.exp(
+            -torch.square(target_velocity_error) / (self.cfg.target_velocity_tracking_std**2 + 1.0e-6)
+        )
+        feet_air_time_reward = self.cfg.rew_scale_feet_air_time * feet_air_time_metric
+        feet_slide_penalty = self.cfg.rew_scale_feet_slide * feet_slide_metric
+        termination_penalty = self.cfg.rew_scale_termination * self.reset_terminated.float()
 
         self.extras["log"]["reward/reach_hand"] = reach_reward.mean().item()
         self.extras["log"]["reward/travel_body"] = travel_reward.mean().item()
         self.extras["log"]["reward/facing"] = facing_reward.mean().item()
         self.extras["log"]["reward/upright"] = upright_reward.mean().item()
         self.extras["log"]["reward/alive"] = alive_reward.mean().item()
+        self.extras["log"]["reward/target_velocity"] = target_velocity_reward.mean().item()
+        self.extras["log"]["reward/feet_air_time"] = feet_air_time_reward.mean().item()
         self.extras["log"]["reward/success_bonus"] = success_reward.mean().item()
+        orientation_penalty = self.cfg.rew_scale_flat_orientation * (torch.abs(roll) + torch.abs(pitch))
+        joint_center_penalty = self.cfg.rew_scale_joint_center * joint_dev_total
+        hip_penalty = self.cfg.rew_scale_joint_hip * hip_dev
+        arms_penalty = self.cfg.rew_scale_joint_arms * arms_dev
+        fingers_penalty = self.cfg.rew_scale_joint_fingers * fingers_dev
+        torso_penalty = self.cfg.rew_scale_joint_torso * torso_dev
+        ankle_penalty = self.cfg.rew_scale_ankle_limits * ankle_limit_metric
+        action_smooth_penalty = self.cfg.rew_scale_action_smooth * action_rate
         self.extras["log"]["penalty/action_rate"] = action_penalty.mean().item()
         self.extras["log"]["penalty/joint_vel"] = joint_vel_penalty.mean().item()
+        self.extras["log"]["penalty/orientation"] = orientation_penalty.mean().item()
+        self.extras["log"]["penalty/joint_center"] = joint_center_penalty.mean().item()
+        self.extras["log"]["penalty/hip_dev"] = hip_penalty.mean().item()
+        self.extras["log"]["penalty/arms_dev"] = arms_penalty.mean().item()
+        self.extras["log"]["penalty/fingers_dev"] = fingers_penalty.mean().item()
+        self.extras["log"]["penalty/torso_dev"] = torso_penalty.mean().item()
+        self.extras["log"]["penalty/ankle_limit"] = ankle_penalty.mean().item()
+        self.extras["log"]["penalty/action_smooth"] = action_smooth_penalty.mean().item()
+        self.extras["log"]["penalty/feet_slide"] = feet_slide_penalty.mean().item()
+        self.extras["log"]["penalty/termination"] = termination_penalty.mean().item()
+
+        self.prev_actions.copy_(self.actions)
 
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        root_pos = self.root_state[:, :3]
-        root_quat = self.root_quat
+        root_pos = self.robot.data.root_pos_w
+        root_quat = self.robot.data.root_quat_w
 
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         upright = up_vec[:, 2]
@@ -224,10 +350,13 @@ class G1ReachEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        self.robot.reset(env_ids)
+        if self._contact_sensor is not None:
+            self._contact_sensor.reset(env_ids)
         super()._reset_idx(env_ids)
 
         joint_pos = self.default_joint_pos[env_ids]
-        joint_vel = torch.zeros_like(self.joint_vel[env_ids])
+        joint_vel = torch.zeros_like(self.robot.data.joint_vel[env_ids])
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
 
@@ -301,6 +430,42 @@ class G1ReachEnv(DirectRLEnv):
         self.target_pos[env_ids] = targets
         self.goal_markers.visualize(self.target_pos)
 
+    def _collect_joint_indices(self, patterns: list[str]) -> list[int]:
+        indices = set()
+        for expr in patterns:
+            joint_ids, _ = self.robot.find_joints(expr)
+            indices.update(joint_ids)
+        return sorted(indices)
+
+    def _compute_foot_metrics(self, move_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._has_foot_feedback:
+            zeros = torch.zeros(self.num_envs, device=self.device)
+            return zeros, zeros
+
+        assert self._contact_sensor is not None
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history[:, :, self._feet_sensor_body_ids, :]
+        force_magnitude = torch.norm(net_contact_forces, dim=-1)
+        contacts = torch.max(force_magnitude, dim=1)[0] > self.cfg.feet_slide_contact_threshold
+
+        if len(self._feet_body_ids) == 0:
+            zeros = torch.zeros(self.num_envs, device=self.device)
+            return zeros, zeros
+
+        feet_vel = self.robot.data.body_lin_vel_w[:, self._feet_body_ids, :2]
+        feet_slide_metric = torch.sum(feet_vel.norm(dim=-1) * contacts.float(), dim=-1)
+
+        air_time = self._contact_sensor.data.current_air_time[:, self._feet_sensor_body_ids]
+        contact_time = self._contact_sensor.data.current_contact_time[:, self._feet_sensor_body_ids]
+        in_contact = contact_time > 0.0
+        in_mode_time = torch.where(in_contact, contact_time, air_time)
+        single_stance = torch.sum(in_contact.int(), dim=1) == 1
+        stance_time = torch.where(single_stance.unsqueeze(-1), in_mode_time, torch.zeros_like(in_mode_time))
+        feet_air_time_metric = torch.min(stance_time, dim=1)[0]
+        feet_air_time_metric = torch.clamp(feet_air_time_metric, max=self.cfg.feet_air_time_threshold)
+        feet_air_time_metric = feet_air_time_metric * move_mask.float()
+
+        return feet_air_time_metric, feet_slide_metric
+
 
 def torch_utils_scale(x: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:
     """Scale joints into [-1, 1] range."""
@@ -316,15 +481,38 @@ def compute_rewards(
     rew_scale_body_target: float,
     rew_scale_facing: float,
     rew_scale_upright: float,
+    rew_scale_target_velocity: float,
     rew_scale_action_rate: float,
     rew_scale_joint_vel: float,
+    rew_scale_flat_orientation: float,
+    rew_scale_joint_center: float,
+    rew_scale_action_smooth: float,
+    rew_scale_joint_hip: float,
+    rew_scale_joint_arms: float,
+    rew_scale_joint_fingers: float,
+    rew_scale_joint_torso: float,
+    rew_scale_ankle_limits: float,
+    rew_scale_feet_air_time: float,
+    rew_scale_feet_slide: float,
+    rew_scale_termination: float,
     success_bonus: float,
     hand_dist: torch.Tensor,
     body_dist: torch.Tensor,
     facing: torch.Tensor,
     upright: torch.Tensor,
+    orientation_metric: torch.Tensor,
+    target_velocity_error: torch.Tensor,
+    target_velocity_tracking_std: float,
     actions: torch.Tensor,
     joint_vel: torch.Tensor,
+    joint_dev_hip: torch.Tensor,
+    joint_dev_arms: torch.Tensor,
+    joint_dev_fingers: torch.Tensor,
+    joint_dev_torso: torch.Tensor,
+    ankle_limits: torch.Tensor,
+    feet_air_time_metric: torch.Tensor,
+    feet_slide_metric: torch.Tensor,
+    action_rate: torch.Tensor,
     success: torch.Tensor,
     reset_terminated: torch.Tensor,
 ) -> torch.Tensor:
@@ -333,9 +521,24 @@ def compute_rewards(
     facing_reward = rew_scale_facing * torch.clamp(facing, min=0.0)
     upright_reward = rew_scale_upright * torch.clamp(upright, min=0.0)
     alive_reward = rew_scale_alive * (1.0 - reset_terminated.float())
+    std_sq = target_velocity_tracking_std * target_velocity_tracking_std + 1.0e-6
+    target_velocity_reward = rew_scale_target_velocity * torch.exp(-torch.square(target_velocity_error) / std_sq)
     action_penalty = rew_scale_action_rate * torch.sum(actions**2, dim=-1)
     joint_vel_penalty = rew_scale_joint_vel * torch.sum(joint_vel**2, dim=-1)
+    orientation_penalty = rew_scale_flat_orientation * orientation_metric
+    joint_center_penalty = rew_scale_joint_center * (
+        joint_dev_hip + joint_dev_arms + joint_dev_fingers + joint_dev_torso
+    )
+    hip_penalty = rew_scale_joint_hip * joint_dev_hip
+    arms_penalty = rew_scale_joint_arms * joint_dev_arms
+    fingers_penalty = rew_scale_joint_fingers * joint_dev_fingers
+    torso_penalty = rew_scale_joint_torso * joint_dev_torso
+    ankle_penalty = rew_scale_ankle_limits * ankle_limits
+    action_smooth_penalty = rew_scale_action_smooth * action_rate
+    feet_air_time_reward = rew_scale_feet_air_time * feet_air_time_metric
+    feet_slide_penalty = rew_scale_feet_slide * feet_slide_metric
     success_reward = success_bonus * success.float()
+    termination_penalty = rew_scale_termination * reset_terminated.float()
 
     total = (
         reach_reward
@@ -344,7 +547,19 @@ def compute_rewards(
         + upright_reward
         + alive_reward
         + success_reward
+        + target_velocity_reward
+        + feet_air_time_reward
+        + termination_penalty
         + action_penalty
         + joint_vel_penalty
+        + orientation_penalty
+        + joint_center_penalty
+        + hip_penalty
+        + arms_penalty
+        + fingers_penalty
+        + torso_penalty
+        + ankle_penalty
+        + action_smooth_penalty
+        + feet_slide_penalty
     )
     return total
