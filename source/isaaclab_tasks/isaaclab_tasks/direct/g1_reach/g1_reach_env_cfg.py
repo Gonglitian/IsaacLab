@@ -12,7 +12,7 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
+from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
 
 
@@ -32,6 +32,12 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
         dt=1 / 120,
         render_interval=decimation,
         use_fabric=True,
+        physx=PhysxCfg(
+        gpu_max_rigid_contact_count=2**23,         # e.g., 8,388,608
+        gpu_max_rigid_patch_count=2**20,           # e.g., 1,048,576
+        gpu_found_lost_pairs_capacity=2**22,       # e.g., 4,194,304
+        gpu_total_aggregate_pairs_capacity=2**22   # 可一并提升
+    )
     )
 
     # robot(s)

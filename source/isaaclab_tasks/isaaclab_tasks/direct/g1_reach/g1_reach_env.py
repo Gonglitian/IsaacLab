@@ -182,11 +182,31 @@ class G1ReachEnv(DirectRLEnv):
 
         if "log" not in self.extras:
             self.extras["log"] = dict()
+        # Log key task signals
         self.extras["log"]["hand_target_dist"] = hand_dist.mean().item()
         self.extras["log"]["body_target_dist"] = body_dist.mean().item()
         self.extras["log"]["facing_dot"] = facing.mean().item()
         self.extras["log"]["upright"] = upright.mean().item()
         self.extras["log"]["success_rate"] = success.float().mean().item()
+
+        # Log per-term reward components for TensorBoard
+        reach_reward = self.cfg.rew_scale_hand_target * torch.exp(-2.5 * hand_dist)
+        travel_reward = self.cfg.rew_scale_body_target * torch.exp(-0.5 * body_dist)
+        facing_reward = self.cfg.rew_scale_facing * torch.clamp(facing, min=0.0)
+        upright_reward = self.cfg.rew_scale_upright * torch.clamp(upright, min=0.0)
+        alive_reward = self.cfg.rew_scale_alive * (1.0 - self.reset_terminated.float())
+        action_penalty = self.cfg.rew_scale_action_rate * torch.sum(self.actions**2, dim=-1)
+        joint_vel_penalty = self.cfg.rew_scale_joint_vel * torch.sum(self.joint_vel**2, dim=-1)
+        success_reward = self.cfg.success_bonus * success.float()
+
+        self.extras["log"]["reward/reach_hand"] = reach_reward.mean().item()
+        self.extras["log"]["reward/travel_body"] = travel_reward.mean().item()
+        self.extras["log"]["reward/facing"] = facing_reward.mean().item()
+        self.extras["log"]["reward/upright"] = upright_reward.mean().item()
+        self.extras["log"]["reward/alive"] = alive_reward.mean().item()
+        self.extras["log"]["reward/success_bonus"] = success_reward.mean().item()
+        self.extras["log"]["penalty/action_rate"] = action_penalty.mean().item()
+        self.extras["log"]["penalty/joint_vel"] = joint_vel_penalty.mean().item()
 
         return reward
 
