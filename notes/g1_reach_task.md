@@ -1,0 +1,60 @@
+# G1 Reach 任务记录
+
+## 调研笔记
+- 阅读 `source/isaaclab_tasks/isaaclab_tasks/direct/locomotion/locomotion_env.py`，借鉴人形机器人在直接控制流程中的姿态/速度观测、力矩缩放与奖励设计方式。
+- 参考 `source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py`，确认 Unitree G1 的关节命名、初始姿态以及常用仿真设置（episode 长度、场景布局等）。
+- 查阅 `source/isaaclab/isaaclab/markers/config/__init__.py` 与 `source/isaaclab_tasks/isaaclab_tasks/direct/quadcopter/quadcopter_env.py`，了解可复用的可视化标记配置与调试渲染回调。
+- 对照 `source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/velocity_env_cfg.py` 的重置与随机化策略，在本任务中引入类似的底座姿态/速度与关节噪声采样逻辑，以提升训练多样性与稳定性。
+
+## 计划
+1. 用 Unitree G1 的 29 自由度模型替换示例 cartpole，包括场景、动作/观测空间以及目标可视化。
+2. 编写新的 RL 环境：控制整个机器人、随机采样 3D 目标、生成包含姿态/速度/相对目标向量的观测，并设计满足“走到目标并以右手触碰且保持平衡”要求的奖励和终止逻辑。
+3. 对齐 RSL-RL 与 skrl 的 PPO 训练配置，更新项目笔记并记录训练/分布式启动方式。
+
+## 进度追踪
+- [x] 完成本任务相关的调研。
+- [x] 实现环境与配置的全面重构（机器人、Reward、目标可视化、reset 随机化等）。
+- [x] 更新 RSL-RL / skrl 训练配置与中文笔记。
+
+## 实现说明
+- 以 Unitree G1 取代 Cartpole 的占位实现，增加 2048 并行环境、红色球形目标可视化、自定义奖励权重以及全关节动作/观测定义。
+- 新的 `G1ReachEnv` 采用平滑关节位置控制，重置阶段随机化底座位置/朝向/速度与关节扰动，并在奖励中结合手部距离、躯干行走距离、朝向、直立度、动作惩罚与成功奖励，满足“抵达并触碰”的任务目标。
+- RSL-RL 与 skrl 的 PPO 配置扩大了网络规模与训练步数，改为 `g1_reach_direct` 实验命名，便于与旧示例区分和追踪日志。
+
+## 训练 / 推理命令
+- **单机单卡训练（RSL-RL）**  
+  ```bash
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+      --task Isaac-G1-Reach-Direct-v0 \
+      --num_envs 2048 \
+      --max_iterations 2500 \
+      --headless
+  ```
+- **单机多卡 / 分布式训练（torch.distributed）**  
+  ```bash
+  ./isaaclab.sh -p -m torch.distributed.run --standalone --nproc_per_node=2 \
+      scripts/reinforcement_learning/rsl_rl/train.py \
+      --task Isaac-G1-Reach-Direct-v0 \
+      --num_envs 4096 \
+      --max_iterations 2500 \
+      --headless \
+      --distributed
+  ```
+  多节点时，把 `--standalone --nproc_per_node=2` 替换为  
+  `--nnodes=<节点数> --nproc_per_node=<每节点GPU数> --node_rank=<编号> --rdzv_backend=c10d --rdzv_endpoint=<主节点IP:端口>`。
+- **RSL-RL 推理 & 录制视频（Play）**  
+  1. 训练时需开启摄像机（`--enable_cameras`），并在环境中配置想要的视角/Follow 方式。  
+  2. 推理/录制采用 `scripts/reinforcement_learning/rsl_rl/play.py`，常用命令：  
+     ```bash
+     ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+         --task Isaac-G1-Reach-Direct-v0 \
+         --num_envs 1 \
+         --headless \
+         --enable_cameras \
+         --video \
+         --video_length 600 \
+         --resume \
+         --load_run <日志目录名例如2025-11-09_21-17-29> \
+         --checkpoint model_000500.pt
+     ```
+     这会加载指定 checkpoint，使用训练时保存的摄像机设置并在 `logs/rsl_rl/g1_reach_direct/<run>/videos/play/` 下生成 MP4。若想实时查看，可把 `--headless` 去掉并在 GUI 里调节相机。*** End Patch
