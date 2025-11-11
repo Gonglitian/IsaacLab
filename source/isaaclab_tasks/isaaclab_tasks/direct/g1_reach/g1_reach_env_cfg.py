@@ -83,7 +83,7 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
 
     # reward / termination parameters
     reach_threshold = 0.2  # [m]
-    success_heading_threshold = 0.75
+    success_heading_threshold = 0.866  # cos(30°)
     upright_dot_threshold = 0.4
     termination_height = 0.65  # [m]
     target_radius_range = (1, 3)  # [m]
@@ -105,15 +105,15 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     hand_pose_target_radius = 0.35
 
     # positive task rewards / bonuses
-    rew_scale_alive = 0.5
-    rew_scale_hand_target = 16.0
+    rew_scale_alive = 0.05
+    rew_scale_hand_target = 2
     rew_scale_body_target = 1.0
     rew_scale_facing = 2.0
-    rew_scale_upright = 5
-    rew_scale_target_velocity = 2.0
-    rew_scale_feet_air_time = 0.25
+    rew_scale_upright = 2
+    rew_scale_target_velocity = 1
+    rew_scale_feet_air_time = 2
     rew_scale_hand_pose = 2.0
-    success_bonus = 24.0
+    success_bonus = 10
 
     # contact-related penalties
     rew_scale_feet_slide = -0.1
@@ -122,15 +122,15 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
 
     # action / velocity penalties
     rew_scale_action_rate = -0.01
-    rew_scale_action_smooth = -0.003
-    rew_scale_joint_vel = -0.004
+    rew_scale_action_smooth = -0.03
+    rew_scale_joint_vel = -0.04
     rew_scale_lin_vel_z = -0.2
     rew_scale_dof_acc = -1.25e-7
     rew_scale_dof_torque = -3.0e-7
 
     # pose alignment & joint deviation penalties
     rew_scale_flat_orientation = -0.1
-    rew_scale_joint_center = -0.02
+    rew_scale_joint_center = -0.05
     rew_scale_joint_hip = -0.12
     rew_scale_joint_arms = -0.15
     rew_scale_joint_fingers = -0.08
