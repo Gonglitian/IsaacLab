@@ -137,6 +137,7 @@ class G1ReachEnv(DirectRLEnv):
         root_quat = self.robot.data.root_quat_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
         hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
+        hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
 
         to_target_root = self.target_pos - root_pos
         to_target_hand = self.target_pos - hand_pos
@@ -185,6 +186,7 @@ class G1ReachEnv(DirectRLEnv):
         root_quat = self.robot.data.root_quat_w
         root_lin_vel = self.robot.data.root_lin_vel_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
+        hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
 
         to_target_root = self.target_pos - root_pos
         to_target_hand = self.target_pos - hand_pos
