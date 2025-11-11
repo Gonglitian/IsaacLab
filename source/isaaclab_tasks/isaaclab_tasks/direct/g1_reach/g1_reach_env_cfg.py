@@ -23,7 +23,7 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
 
     # env
     decimation = 4
-    episode_length_s = 12.0
+    episode_length_s = 5.0
     action_space = 43
     observation_space = 148
     state_space = 0
@@ -110,8 +110,8 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     rew_scale_alive = 0.05
     rew_scale_hand_target = 2
     rew_scale_body_target = 2
-    rew_scale_facing = 2.0
-    rew_scale_upright = 2
+    rew_scale_facing = 0.5
+    rew_scale_upright = 0.5
     rew_scale_target_velocity = 5
     rew_scale_feet_air_time = 6
     rew_scale_hand_pose = 2.0
