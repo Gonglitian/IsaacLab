@@ -57,9 +57,7 @@
          --headless \
          --enable_cameras \
          --video \
-         --video_length 600 \
-         --resume \
-         --load_run <日志目录名例如2025-11-09_21-17-29> \
-         --checkpoint model_000500.pt
+         --video_length 1000 \
+         --checkpoint logs/rsl_rl/g1_reach_direct/labserver_models/model_200.pt
      ```
      这会加载指定 checkpoint，使用训练时保存的摄像机设置并在 `logs/rsl_rl/g1_reach_direct/<run>/videos/play/` 下生成 MP4。若想实时查看，可把 `--headless` 去掉并在 GUI 里调节相机。*** End Patch
