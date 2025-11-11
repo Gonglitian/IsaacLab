@@ -68,6 +68,15 @@ class G1ReachEnv(DirectRLEnv):
             "fingers": build_group([".*_hand_.*", ".*_thumb_.*"]),
             "torso": build_group(["waist_.*_joint"]),
         }
+        # 左手关节（用于稳定性奖励）
+        self._left_hand_joint_ids = build_group(
+            [
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+            ]
+        )
         self._ankle_joint_ids = build_group([".*_ankle_pitch_joint", ".*_ankle_roll_joint"])
         self._dof_acc_joint_ids = build_group([".*_hip_.*", ".*_knee_joint"])
         self._dof_torque_joint_ids = build_group([".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"])
@@ -83,6 +92,11 @@ class G1ReachEnv(DirectRLEnv):
         if len(hand_body_ids) == 0:
             raise ValueError(f"Unable to find body named '{self.cfg.right_hand_body_name}' on the G1 articulation.")
         self._right_hand_body_id = hand_body_ids[0]
+
+        torso_body_ids, _ = self.robot.find_bodies(self.cfg.torso_body_name)
+        if len(torso_body_ids) == 0:
+            raise ValueError(f"Unable to find body named '{self.cfg.torso_body_name}' on the G1 articulation.")
+        self._torso_body_id = torso_body_ids[0]
 
         # helper tensors
         self._env_z = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat((self.num_envs, 1))
@@ -137,7 +151,6 @@ class G1ReachEnv(DirectRLEnv):
         root_quat = self.robot.data.root_quat_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
         hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
-        hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
 
         to_target_root = self.target_pos - root_pos
         to_target_hand = self.target_pos - hand_pos
@@ -145,7 +158,7 @@ class G1ReachEnv(DirectRLEnv):
         heading_vec = math_utils.quat_apply(root_quat, self._env_x)
         heading_vec = math_utils.normalize(heading_vec)
         dir_to_target = math_utils.normalize(to_target_root)
-
+    
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         up_proj = up_vec[:, 2]
 
@@ -187,6 +200,7 @@ class G1ReachEnv(DirectRLEnv):
         root_lin_vel = self.robot.data.root_lin_vel_w
         hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
         hand_quat = self.robot.data.body_quat_w[:, self._right_hand_body_id]
+        torso_quat = self.robot.data.body_quat_w[:, self._torso_body_id]
 
         to_target_root = self.target_pos - root_pos
         to_target_hand = self.target_pos - hand_pos
@@ -209,6 +223,8 @@ class G1ReachEnv(DirectRLEnv):
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         upright = up_vec[:, 2]
         flat_orientation_metric = torch.sum(torch.square(up_vec[:, :2]), dim=-1)
+        torso_up = math_utils.quat_apply(torso_quat, self._env_z)
+        torso_upright_metric = torch.sum(torch.square(torso_up[:, :2]), dim=-1)
 
         desired_speed = torch.clamp(body_dist, max=self.cfg.target_velocity_max_cmd)
         actual_speed_along_dir = torch.sum(root_lin_vel[:, :2] * dir_to_target_xy_unit, dim=-1)
@@ -260,6 +276,21 @@ class G1ReachEnv(DirectRLEnv):
         else:
             dof_torque_metric = torch.zeros(self.num_envs, device=self.device)
 
+        # 左手稳定性指标
+        if self._left_hand_joint_ids.numel() > 0:
+            left_hand_pos = joint_pos[:, self._left_hand_joint_ids]
+            left_hand_default = self.default_joint_pos_ref[self._left_hand_joint_ids]
+            left_hand_range = self.joint_range[self._left_hand_joint_ids]
+            left_hand_deviation = torch.sum(
+                torch.abs(left_hand_pos - left_hand_default) / left_hand_range.clamp_min(1e-3),
+                dim=-1,
+            )
+        else:
+            left_hand_deviation = torch.zeros(self.num_envs, device=self.device)
+
+        # 阶段性奖励面具：只有当facing足够好时，才启用移动相关奖励
+        facing_good = facing > self.cfg.facing_threshold_for_movement
+
         reward = compute_rewards(
             self.cfg.rew_scale_alive,
             self.cfg.rew_scale_hand_target,
@@ -282,7 +313,9 @@ class G1ReachEnv(DirectRLEnv):
             self.cfg.rew_scale_lin_vel_z,
             self.cfg.rew_scale_dof_acc,
             self.cfg.rew_scale_dof_torque,
+            self.cfg.rew_scale_torso_upright,
             self.cfg.rew_scale_hand_pose,
+            self.cfg.rew_scale_left_hand,
             self.cfg.rew_scale_termination,
             self.cfg.success_bonus,
             hand_dist,
@@ -290,6 +323,7 @@ class G1ReachEnv(DirectRLEnv):
             facing,
             upright,
             flat_orientation_metric,
+            torso_upright_metric,
             target_velocity_error,
             self.cfg.target_velocity_tracking_std,
             hand_pose_metric,
@@ -306,6 +340,8 @@ class G1ReachEnv(DirectRLEnv):
             lin_vel_z_metric,
             dof_acc_metric,
             dof_torque_metric,
+            left_hand_deviation,
+            facing_good,
             success,
             self.reset_terminated,
         )
@@ -318,6 +354,8 @@ class G1ReachEnv(DirectRLEnv):
         self.extras["log"]["facing_dot"] = facing.mean().item()
         self.extras["log"]["upright"] = upright.mean().item()
         self.extras["log"]["success_rate"] = success.float().mean().item()
+        self.extras["log"]["left_hand_deviation"] = left_hand_deviation.mean().item()
+        self.extras["log"]["facing_good_ratio"] = facing_good.float().mean().item()
 
         # Log per-term reward components for TensorBoard
         reach_reward = self.cfg.rew_scale_hand_target * torch.exp(-2.5 * hand_dist)
@@ -356,10 +394,12 @@ class G1ReachEnv(DirectRLEnv):
         lin_vel_z_penalty = self.cfg.rew_scale_lin_vel_z * lin_vel_z_metric
         dof_acc_penalty = self.cfg.rew_scale_dof_acc * dof_acc_metric
         dof_torque_penalty = self.cfg.rew_scale_dof_torque * dof_torque_metric
+        torso_upright_penalty = self.cfg.rew_scale_torso_upright * torso_upright_metric
         self.extras["log"]["penalty/action_rate"] = action_penalty.mean().item()
         self.extras["log"]["penalty/action_smooth"] = action_smooth_penalty.mean().item()
         self.extras["log"]["penalty/joint_vel"] = joint_vel_penalty.mean().item()
         self.extras["log"]["penalty/orientation"] = orientation_penalty.mean().item()
+        self.extras["log"]["penalty/torso_upright"] = torso_upright_penalty.mean().item()
         self.extras["log"]["penalty/joint_center"] = joint_center_penalty.mean().item()
         self.extras["log"]["penalty/hip_dev"] = hip_penalty.mean().item()
         self.extras["log"]["penalty/arms_dev"] = arms_penalty.mean().item()
@@ -371,6 +411,8 @@ class G1ReachEnv(DirectRLEnv):
         self.extras["log"]["penalty/dof_torque"] = dof_torque_penalty.mean().item()
         self.extras["log"]["penalty/feet_slide"] = feet_slide_penalty.mean().item()
         self.extras["log"]["penalty/termination"] = termination_penalty.mean().item()
+        left_hand_penalty = self.cfg.rew_scale_left_hand * left_hand_deviation
+        self.extras["log"]["penalty/left_hand"] = left_hand_penalty.mean().item()
 
         self.prev_actions.copy_(self.actions)
 
@@ -379,13 +421,24 @@ class G1ReachEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         root_pos = self.robot.data.root_pos_w
         root_quat = self.robot.data.root_quat_w
+        hand_pos = self.robot.data.body_pos_w[:, self._right_hand_body_id]
 
+        # 检查摔倒
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         upright = up_vec[:, 2]
         fell = (root_pos[:, 2] < self.cfg.termination_height) | (upright < self.cfg.upright_dot_threshold)
 
+        # 检查成功完成：手部到达目标且朝向正确
+        to_target_root = self.target_pos - root_pos
+        hand_dist = torch.linalg.norm(self.target_pos - hand_pos, dim=-1)
+        dir_to_target = math_utils.normalize(to_target_root)
+        heading_vec = math_utils.normalize(math_utils.quat_apply(root_quat, self._env_x))
+        facing = torch.sum(heading_vec * dir_to_target, dim=-1)
+        success = (hand_dist < self.cfg.reach_threshold) & (facing > self.cfg.success_heading_threshold)
+
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        return fell, time_out
+        # 成功或摔倒都会终止episode
+        return fell | success, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
@@ -448,6 +501,12 @@ class G1ReachEnv(DirectRLEnv):
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         self.goal_markers.set_visibility(debug_vis)
+        if self.cfg.enable_direction_markers:
+            self.heading_markers.set_visibility(debug_vis)
+            self.dir_to_target_markers.set_visibility(debug_vis)
+            self.up_vec_markers.set_visibility(debug_vis)
+            self.hand_forward_markers.set_visibility(debug_vis)
+            self.to_target_hand_markers.set_visibility(debug_vis)
 
     def _debug_vis_callback(self, _event):
         self.goal_markers.visualize(self.target_pos)
@@ -537,7 +596,9 @@ def compute_rewards(
     rew_scale_lin_vel_z: float,
     rew_scale_dof_acc: float,
     rew_scale_dof_torque: float,
+    rew_scale_torso_upright: float,
     rew_scale_hand_pose: float,
+    rew_scale_left_hand: float,
     rew_scale_termination: float,
     success_bonus: float,
     hand_dist: torch.Tensor,
@@ -545,6 +606,7 @@ def compute_rewards(
     facing: torch.Tensor,
     upright: torch.Tensor,
     orientation_metric: torch.Tensor,
+    torso_upright_metric: torch.Tensor,
     target_velocity_error: torch.Tensor,
     target_velocity_tracking_std: float,
     hand_pose_metric: torch.Tensor,
@@ -561,16 +623,31 @@ def compute_rewards(
     lin_vel_z_metric: torch.Tensor,
     joint_acc_metric: torch.Tensor,
     joint_torque_metric: torch.Tensor,
+    left_hand_deviation: torch.Tensor,
+    facing_good: torch.Tensor,
     success: torch.Tensor,
     reset_terminated: torch.Tensor,
 ) -> torch.Tensor:
-    reach_reward = rew_scale_hand_target * torch.exp(-2.5 * hand_dist)
-    travel_reward = rew_scale_body_target * torch.exp(-0.5 * body_dist)
+    # 基础奖励（不受阶段性控制）
     facing_reward = rew_scale_facing * torch.clamp(facing, min=0.0)
     upright_reward = rew_scale_upright * torch.clamp(upright, min=0.0)
     alive_reward = rew_scale_alive * (1.0 - reset_terminated.float())
+    success_reward = success_bonus * success.float()
+    termination_penalty = rew_scale_termination * reset_terminated.float()
+    
+    # 阶段性奖励：只有当facing足够好时才启用
+    # 将facing_good布尔张量转换为浮点数mask
+    phase_mask = facing_good.float()
+    
+    # 移动相关奖励（受阶段性控制）
+    reach_reward = rew_scale_hand_target * torch.exp(-2.5 * hand_dist) * phase_mask
+    travel_reward = rew_scale_body_target * torch.exp(-0.5 * body_dist) * phase_mask
     std_sq = target_velocity_tracking_std * target_velocity_tracking_std + 1.0e-6
-    target_velocity_reward = rew_scale_target_velocity * torch.exp(-torch.square(target_velocity_error) / std_sq)
+    target_velocity_reward = rew_scale_target_velocity * torch.exp(-torch.square(target_velocity_error) / std_sq) * phase_mask
+    feet_air_time_reward = rew_scale_feet_air_time * feet_air_time_metric * phase_mask
+    hand_pose_reward = rew_scale_hand_pose * hand_pose_metric * phase_mask
+    
+    # 惩罚项
     action_penalty = rew_scale_action_rate * action_magnitude
     action_smooth_penalty = rew_scale_action_smooth * action_delta
     joint_vel_penalty = rew_scale_joint_vel * torch.sum(joint_vel**2, dim=-1)
@@ -586,23 +663,26 @@ def compute_rewards(
     lin_vel_z_penalty = rew_scale_lin_vel_z * lin_vel_z_metric
     joint_acc_penalty = rew_scale_dof_acc * joint_acc_metric
     joint_torque_penalty = rew_scale_dof_torque * joint_torque_metric
-    feet_air_time_reward = rew_scale_feet_air_time * feet_air_time_metric
     feet_slide_penalty = rew_scale_feet_slide * feet_slide_metric
-    hand_pose_reward = rew_scale_hand_pose * hand_pose_metric
-    success_reward = success_bonus * success.float()
-    termination_penalty = rew_scale_termination * reset_terminated.float()
+    torso_upright_penalty = rew_scale_torso_upright * torso_upright_metric
+    
+    # 左手稳定性惩罚
+    left_hand_penalty = rew_scale_left_hand * left_hand_deviation
 
     total = (
-        reach_reward
-        + travel_reward
-        + facing_reward
+        # 基础奖励
+        facing_reward
         + upright_reward
         + alive_reward
         + success_reward
-        + hand_pose_reward
+        + termination_penalty
+        # 阶段性奖励（只在facing_good时启用）
+        + reach_reward
+        + travel_reward
         + target_velocity_reward
         + feet_air_time_reward
-        + termination_penalty
+        + hand_pose_reward
+        # 惩罚项
         + action_penalty
         + action_smooth_penalty
         + joint_vel_penalty
@@ -617,5 +697,7 @@ def compute_rewards(
         + lin_vel_z_penalty
         + joint_acc_penalty
         + joint_torque_penalty
+        + torso_upright_penalty
+        + left_hand_penalty
     )
     return total

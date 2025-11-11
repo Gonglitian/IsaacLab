@@ -11,6 +11,7 @@ from isaaclab_assets.robots.unitree import G1_29DOF_CFG
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkersCfg
+
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
@@ -71,10 +72,15 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
 
     # controllable elements / reference names
     right_hand_body_name = "right_wrist_yaw_link"
+    torso_body_name = "torso_link"
 
     # action scaling
     action_scale = 0.35  # [rad] relative to default pose
     action_smoothing = 0.15
+
+    # phased reward parameters (阶段性奖励参数)
+    facing_threshold_for_movement: float = 0.7
+    """转向阈值：facing > 此值时才启用移动相关奖励 (cos(45°) ≈ 0.707)"""
 
     # observation normalization scales
     lin_vel_scale = 1.0
@@ -115,6 +121,7 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     rew_scale_target_velocity = 5
     rew_scale_feet_air_time = 6
     rew_scale_hand_pose = 2.0
+    rew_scale_torso_upright = -0.2
     success_bonus = 10
 
     # contact-related penalties
@@ -137,6 +144,10 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     rew_scale_joint_arms = -0.15
     rew_scale_joint_fingers = -0.08
     rew_scale_joint_torso = -0.12
+    
+    # left hand stability penalty (左手稳定性惩罚)
+    rew_scale_left_hand = -0.25
+    """惩罚左手偏离默认位置"""
 
     def __post_init__(self):
         # keep render interval aligned with control frequency
