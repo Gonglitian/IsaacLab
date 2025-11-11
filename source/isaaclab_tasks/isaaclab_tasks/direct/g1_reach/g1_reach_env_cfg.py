@@ -86,10 +86,12 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     success_heading_threshold = 0.866  # cos(30°)
     upright_dot_threshold = 0.4
     termination_height = 0.65  # [m]
-    target_radius_range = (1, 3)  # [m]
-    target_height_range = (0.5, 1.2)  # [m]
+    target_radius_range = (1, 1.5)  # [m]
+    target_height_range = (0.8, 1)  # [m]
     base_xy_range = (-0.25, 0.25)  # random XY shift per reset [m]
     base_yaw_range = (-0.5 * math.pi, 0.5 * math.pi)  # random heading offset [rad]
+    
+    # reset randomization
     base_lin_vel_range = (-0.2, 0.2)
     base_ang_vel_range = (-0.2, 0.2)
     joint_pos_noise = 0.1
@@ -107,11 +109,11 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     # positive task rewards / bonuses
     rew_scale_alive = 0.05
     rew_scale_hand_target = 2
-    rew_scale_body_target = 1.0
+    rew_scale_body_target = 2
     rew_scale_facing = 2.0
     rew_scale_upright = 2
-    rew_scale_target_velocity = 1
-    rew_scale_feet_air_time = 2
+    rew_scale_target_velocity = 5
+    rew_scale_feet_air_time = 6
     rew_scale_hand_pose = 2.0
     success_bonus = 10
 
@@ -123,7 +125,7 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     # action / velocity penalties
     rew_scale_action_rate = -0.01
     rew_scale_action_smooth = -0.03
-    rew_scale_joint_vel = -0.04
+    rew_scale_joint_vel = -0.0004
     rew_scale_lin_vel_z = -0.2
     rew_scale_dof_acc = -1.25e-7
     rew_scale_dof_torque = -3.0e-7
