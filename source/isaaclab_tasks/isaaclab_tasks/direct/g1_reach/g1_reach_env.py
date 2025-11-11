@@ -69,6 +69,11 @@ class G1ReachEnv(DirectRLEnv):
             "torso": build_group(["waist_.*_joint"]),
         }
         self._ankle_joint_ids = build_group([".*_ankle_pitch_joint", ".*_ankle_roll_joint"])
+        self._dof_acc_joint_ids = build_group([".*_hip_.*", ".*_knee_joint"])
+        self._dof_torque_joint_ids = build_group([".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"])
+        desired_hand_dir = torch.tensor(self.cfg.hand_pose_desired_dir, dtype=torch.float32, device=self.device)
+        desired_hand_dir = desired_hand_dir / torch.linalg.norm(desired_hand_dir).clamp_min(1.0e-6)
+        self._hand_pose_desired_dir = desired_hand_dir
         self.smooth_joint_targets = self.default_joint_pos.clone()
 
         self.target_pos = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -186,6 +191,11 @@ class G1ReachEnv(DirectRLEnv):
 
         hand_dist = torch.linalg.norm(to_target_hand, dim=-1)
         body_dist = torch.linalg.norm(to_target_root[:, :2], dim=-1)
+        hand_forward = math_utils.quat_apply(hand_quat, self._hand_forward_local)
+        hand_forward = math_utils.normalize(hand_forward)
+        hand_pose_alignment = torch.sum(hand_forward * self._hand_pose_desired_dir, dim=-1)
+        hand_pose_mask = torch.exp(-hand_dist / (self.cfg.hand_pose_target_radius + 1.0e-6))
+        hand_pose_metric = torch.clamp(hand_pose_alignment, min=0.0) * hand_pose_mask
 
         dir_to_target = math_utils.normalize(to_target_root)
         dir_to_target_xy = to_target_root[:, :2]
@@ -196,6 +206,7 @@ class G1ReachEnv(DirectRLEnv):
 
         up_vec = math_utils.quat_apply(root_quat, self._env_z)
         upright = up_vec[:, 2]
+        flat_orientation_metric = torch.sum(torch.square(up_vec[:, :2]), dim=-1)
 
         desired_speed = torch.clamp(body_dist, max=self.cfg.target_velocity_max_cmd)
         actual_speed_along_dir = torch.sum(root_lin_vel[:, :2] * dir_to_target_xy_unit, dim=-1)
@@ -233,8 +244,19 @@ class G1ReachEnv(DirectRLEnv):
         else:
             ankle_limit_metric = torch.zeros(self.num_envs, device=self.device)
 
-        action_rate = torch.sum((self.actions - self.prev_actions) ** 2, dim=-1)
-        roll, pitch, _ = math_utils.euler_xyz_from_quat(root_quat)
+        action_delta = torch.sum((self.actions - self.prev_actions) ** 2, dim=-1)
+        action_magnitude = torch.sum(self.actions**2, dim=-1)
+        lin_vel_z_metric = torch.square(root_lin_vel[:, 2])
+        joint_acc_data = getattr(self.robot.data, "joint_acc", None)
+        if joint_acc_data is not None and self._dof_acc_joint_ids.numel() > 0:
+            dof_acc_metric = torch.sum(torch.square(joint_acc_data[:, self._dof_acc_joint_ids]), dim=-1)
+        else:
+            dof_acc_metric = torch.zeros(self.num_envs, device=self.device)
+        joint_torque_data = getattr(self.robot.data, "applied_torque", None)
+        if joint_torque_data is not None and self._dof_torque_joint_ids.numel() > 0:
+            dof_torque_metric = torch.sum(torch.square(joint_torque_data[:, self._dof_torque_joint_ids]), dim=-1)
+        else:
+            dof_torque_metric = torch.zeros(self.num_envs, device=self.device)
 
         reward = compute_rewards(
             self.cfg.rew_scale_alive,
@@ -244,10 +266,10 @@ class G1ReachEnv(DirectRLEnv):
             self.cfg.rew_scale_upright,
             self.cfg.rew_scale_target_velocity,
             self.cfg.rew_scale_action_rate,
+            self.cfg.rew_scale_action_smooth,
             self.cfg.rew_scale_joint_vel,
             self.cfg.rew_scale_flat_orientation,
             self.cfg.rew_scale_joint_center,
-            self.cfg.rew_scale_action_smooth,
             self.cfg.rew_scale_joint_hip,
             self.cfg.rew_scale_joint_arms,
             self.cfg.rew_scale_joint_fingers,
@@ -255,16 +277,20 @@ class G1ReachEnv(DirectRLEnv):
             self.cfg.rew_scale_ankle_limits,
             self.cfg.rew_scale_feet_air_time,
             self.cfg.rew_scale_feet_slide,
+            self.cfg.rew_scale_lin_vel_z,
+            self.cfg.rew_scale_dof_acc,
+            self.cfg.rew_scale_dof_torque,
+            self.cfg.rew_scale_hand_pose,
             self.cfg.rew_scale_termination,
             self.cfg.success_bonus,
             hand_dist,
             body_dist,
             facing,
             upright,
-            torch.abs(roll) + torch.abs(pitch),
+            flat_orientation_metric,
             target_velocity_error,
             self.cfg.target_velocity_tracking_std,
-            self.actions,
+            hand_pose_metric,
             self.robot.data.joint_vel,
             hip_dev,
             arms_dev,
@@ -273,7 +299,11 @@ class G1ReachEnv(DirectRLEnv):
             ankle_limit_metric,
             feet_air_time_metric,
             feet_slide_metric,
-            action_rate,
+            action_magnitude,
+            action_delta,
+            lin_vel_z_metric,
+            dof_acc_metric,
+            dof_torque_metric,
             success,
             self.reset_terminated,
         )
@@ -293,7 +323,8 @@ class G1ReachEnv(DirectRLEnv):
         facing_reward = self.cfg.rew_scale_facing * torch.clamp(facing, min=0.0)
         upright_reward = self.cfg.rew_scale_upright * torch.clamp(upright, min=0.0)
         alive_reward = self.cfg.rew_scale_alive * (1.0 - self.reset_terminated.float())
-        action_penalty = self.cfg.rew_scale_action_rate * torch.sum(self.actions**2, dim=-1)
+        action_penalty = self.cfg.rew_scale_action_rate * action_magnitude
+        action_smooth_penalty = self.cfg.rew_scale_action_smooth * action_delta
         joint_vel_penalty = self.cfg.rew_scale_joint_vel * torch.sum(self.robot.data.joint_vel**2, dim=-1)
         success_reward = self.cfg.success_bonus * success.float()
         target_velocity_reward = self.cfg.rew_scale_target_velocity * torch.exp(
@@ -301,6 +332,7 @@ class G1ReachEnv(DirectRLEnv):
         )
         feet_air_time_reward = self.cfg.rew_scale_feet_air_time * feet_air_time_metric
         feet_slide_penalty = self.cfg.rew_scale_feet_slide * feet_slide_metric
+        hand_pose_reward = self.cfg.rew_scale_hand_pose * hand_pose_metric
         termination_penalty = self.cfg.rew_scale_termination * self.reset_terminated.float()
 
         self.extras["log"]["reward/reach_hand"] = reach_reward.mean().item()
@@ -311,15 +343,19 @@ class G1ReachEnv(DirectRLEnv):
         self.extras["log"]["reward/target_velocity"] = target_velocity_reward.mean().item()
         self.extras["log"]["reward/feet_air_time"] = feet_air_time_reward.mean().item()
         self.extras["log"]["reward/success_bonus"] = success_reward.mean().item()
-        orientation_penalty = self.cfg.rew_scale_flat_orientation * (torch.abs(roll) + torch.abs(pitch))
+        self.extras["log"]["reward/hand_pose"] = hand_pose_reward.mean().item()
+        orientation_penalty = self.cfg.rew_scale_flat_orientation * flat_orientation_metric
         joint_center_penalty = self.cfg.rew_scale_joint_center * joint_dev_total
         hip_penalty = self.cfg.rew_scale_joint_hip * hip_dev
         arms_penalty = self.cfg.rew_scale_joint_arms * arms_dev
         fingers_penalty = self.cfg.rew_scale_joint_fingers * fingers_dev
         torso_penalty = self.cfg.rew_scale_joint_torso * torso_dev
         ankle_penalty = self.cfg.rew_scale_ankle_limits * ankle_limit_metric
-        action_smooth_penalty = self.cfg.rew_scale_action_smooth * action_rate
+        lin_vel_z_penalty = self.cfg.rew_scale_lin_vel_z * lin_vel_z_metric
+        dof_acc_penalty = self.cfg.rew_scale_dof_acc * dof_acc_metric
+        dof_torque_penalty = self.cfg.rew_scale_dof_torque * dof_torque_metric
         self.extras["log"]["penalty/action_rate"] = action_penalty.mean().item()
+        self.extras["log"]["penalty/action_smooth"] = action_smooth_penalty.mean().item()
         self.extras["log"]["penalty/joint_vel"] = joint_vel_penalty.mean().item()
         self.extras["log"]["penalty/orientation"] = orientation_penalty.mean().item()
         self.extras["log"]["penalty/joint_center"] = joint_center_penalty.mean().item()
@@ -328,7 +364,9 @@ class G1ReachEnv(DirectRLEnv):
         self.extras["log"]["penalty/fingers_dev"] = fingers_penalty.mean().item()
         self.extras["log"]["penalty/torso_dev"] = torso_penalty.mean().item()
         self.extras["log"]["penalty/ankle_limit"] = ankle_penalty.mean().item()
-        self.extras["log"]["penalty/action_smooth"] = action_smooth_penalty.mean().item()
+        self.extras["log"]["penalty/lin_vel_z"] = lin_vel_z_penalty.mean().item()
+        self.extras["log"]["penalty/dof_acc"] = dof_acc_penalty.mean().item()
+        self.extras["log"]["penalty/dof_torque"] = dof_torque_penalty.mean().item()
         self.extras["log"]["penalty/feet_slide"] = feet_slide_penalty.mean().item()
         self.extras["log"]["penalty/termination"] = termination_penalty.mean().item()
 
@@ -483,10 +521,10 @@ def compute_rewards(
     rew_scale_upright: float,
     rew_scale_target_velocity: float,
     rew_scale_action_rate: float,
+    rew_scale_action_smooth: float,
     rew_scale_joint_vel: float,
     rew_scale_flat_orientation: float,
     rew_scale_joint_center: float,
-    rew_scale_action_smooth: float,
     rew_scale_joint_hip: float,
     rew_scale_joint_arms: float,
     rew_scale_joint_fingers: float,
@@ -494,6 +532,10 @@ def compute_rewards(
     rew_scale_ankle_limits: float,
     rew_scale_feet_air_time: float,
     rew_scale_feet_slide: float,
+    rew_scale_lin_vel_z: float,
+    rew_scale_dof_acc: float,
+    rew_scale_dof_torque: float,
+    rew_scale_hand_pose: float,
     rew_scale_termination: float,
     success_bonus: float,
     hand_dist: torch.Tensor,
@@ -503,7 +545,7 @@ def compute_rewards(
     orientation_metric: torch.Tensor,
     target_velocity_error: torch.Tensor,
     target_velocity_tracking_std: float,
-    actions: torch.Tensor,
+    hand_pose_metric: torch.Tensor,
     joint_vel: torch.Tensor,
     joint_dev_hip: torch.Tensor,
     joint_dev_arms: torch.Tensor,
@@ -512,7 +554,11 @@ def compute_rewards(
     ankle_limits: torch.Tensor,
     feet_air_time_metric: torch.Tensor,
     feet_slide_metric: torch.Tensor,
-    action_rate: torch.Tensor,
+    action_magnitude: torch.Tensor,
+    action_delta: torch.Tensor,
+    lin_vel_z_metric: torch.Tensor,
+    joint_acc_metric: torch.Tensor,
+    joint_torque_metric: torch.Tensor,
     success: torch.Tensor,
     reset_terminated: torch.Tensor,
 ) -> torch.Tensor:
@@ -523,7 +569,8 @@ def compute_rewards(
     alive_reward = rew_scale_alive * (1.0 - reset_terminated.float())
     std_sq = target_velocity_tracking_std * target_velocity_tracking_std + 1.0e-6
     target_velocity_reward = rew_scale_target_velocity * torch.exp(-torch.square(target_velocity_error) / std_sq)
-    action_penalty = rew_scale_action_rate * torch.sum(actions**2, dim=-1)
+    action_penalty = rew_scale_action_rate * action_magnitude
+    action_smooth_penalty = rew_scale_action_smooth * action_delta
     joint_vel_penalty = rew_scale_joint_vel * torch.sum(joint_vel**2, dim=-1)
     orientation_penalty = rew_scale_flat_orientation * orientation_metric
     joint_center_penalty = rew_scale_joint_center * (
@@ -534,9 +581,12 @@ def compute_rewards(
     fingers_penalty = rew_scale_joint_fingers * joint_dev_fingers
     torso_penalty = rew_scale_joint_torso * joint_dev_torso
     ankle_penalty = rew_scale_ankle_limits * ankle_limits
-    action_smooth_penalty = rew_scale_action_smooth * action_rate
+    lin_vel_z_penalty = rew_scale_lin_vel_z * lin_vel_z_metric
+    joint_acc_penalty = rew_scale_dof_acc * joint_acc_metric
+    joint_torque_penalty = rew_scale_dof_torque * joint_torque_metric
     feet_air_time_reward = rew_scale_feet_air_time * feet_air_time_metric
     feet_slide_penalty = rew_scale_feet_slide * feet_slide_metric
+    hand_pose_reward = rew_scale_hand_pose * hand_pose_metric
     success_reward = success_bonus * success.float()
     termination_penalty = rew_scale_termination * reset_terminated.float()
 
@@ -547,10 +597,12 @@ def compute_rewards(
         + upright_reward
         + alive_reward
         + success_reward
+        + hand_pose_reward
         + target_velocity_reward
         + feet_air_time_reward
         + termination_penalty
         + action_penalty
+        + action_smooth_penalty
         + joint_vel_penalty
         + orientation_penalty
         + joint_center_penalty
@@ -559,7 +611,9 @@ def compute_rewards(
         + fingers_penalty
         + torso_penalty
         + ankle_penalty
-        + action_smooth_penalty
         + feet_slide_penalty
+        + lin_vel_z_penalty
+        + joint_acc_penalty
+        + joint_torque_penalty
     )
     return total

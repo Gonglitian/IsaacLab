@@ -21,10 +21,11 @@
 - 新的 `G1ReachEnv` 采用平滑关节位置控制，重置阶段随机化底座位置/朝向/速度与关节扰动，并在奖励中结合手部距离、躯干行走距离、朝向、直立度、动作惩罚与成功奖励，满足“抵达并触碰”的任务目标。
 - RSL-RL 与 skrl 的 PPO 配置扩大了网络规模与训练步数，改为 `g1_reach_direct` 实验命名，便于与旧示例区分和追踪日志。
 - 参数调优（优化版）：参考 G1 速度任务与本地调试结果，对奖励/随机化做了一次迭代——alive reward 降到 0.2，迫使 agent 靠近目标才能得分；hand/body/facing 分别增至 8.0/1.0/2.0，成为主驱动力；upright 保持 1.0，既保证平衡又允许身体有动作；action/joint 惩罚调整为 -0.005/-0.001；success bonus 仍为 15。训练前期把 `target_radius_range` 缩小到 (0.5, 1.5)，`reach_threshold` 放宽至 0.2，方便先学会触手；后期再逐步拉回原来的距离/阈值。同时借鉴 locomotion 任务常用约束：  
-  - **姿态/躯干惩罚**：新增 `rew_scale_flat_orientation=-0.5`，利用 roll/pitch 绝对值抑制大幅倾倒。  
-  - **关节回中**：`rew_scale_joint_center=-0.05`，以默认姿态为参考，避免髋/臂长期偏离。  
-  - **动作平滑**：`rew_scale_action_smooth=-0.002`，惩罚连续步的动作跳变，得到更平滑的控制。  
-  - **细化姿态分组**：曾尝试加入 hip/arms/fingers/torso 的 `joint_dev` 惩罚与踝关节 limit penalty，但评估发现这些约束过强会阻碍 reach 行为，因此当前版本把这些系数降为 0，只保留 `flat_orientation` 与 `joint_center` 的轻度约束（分别为 -0.1 / -0.01），并把主任务信号强化为 `rew_scale_hand_target=16`、`success_bonus=24`。
+  - **姿态/躯干惩罚**：使用 `rew_scale_flat_orientation=-0.1` 的“flat orientation L2”度量（仿照 velocity 任务，基于重力投影而非 roll/pitch 绝对值）来抑制大幅倾倒。  
+  - **关节回中**：`rew_scale_joint_center=-0.01`，以默认姿态为参考，避免髋/臂长期偏离，同时保留分组级别的 hip/arms/fingers/torso 约束。  
+  - **动作变化率**：移除单独的动作幅值惩罚，采用与 velocity 任务一致的 `rew_scale_action_rate=-0.005`，仅对相邻步动作差分做 L2 约束。  
+  - **动力学正则**：比照 velocity 任务新增竖直速度 (`rew_scale_lin_vel_z=-0.2`)、关节加速度 (`rew_scale_dof_acc=-1.25e-7`) 与力矩 (`rew_scale_dof_torque=-1.5e-7`) 惩罚，用于抑制跳跃/抖动并提升轨迹平滑度。
+  - **手部姿态约束**：新增 `rew_scale_hand_pose=2.0`，结合 `hand_pose_desired_dir=(0,0,1)` 与目标半径 0.35 m，仅在手接近目标时奖励掌心向上的姿态，避免完成任务时手臂姿态失控。
 
 ## 训练 / 推理命令
 - **单机单卡训练（RSL-RL）**  

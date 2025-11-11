@@ -310,7 +310,7 @@ class EventTermCfg(ManagerTermBaseCfg):
 class RewardTermCfg(ManagerTermBaseCfg):
     """Configuration for a reward term."""
 
-    func: Callable[..., torch.Tensor] = MISSING
+    func: Callable[..., torch.Tensor] = MISSING  # pyright: ignore[reportAssignmentType]
     """The name of the function to be called.
 
     This function should take the environment object and any other parameters

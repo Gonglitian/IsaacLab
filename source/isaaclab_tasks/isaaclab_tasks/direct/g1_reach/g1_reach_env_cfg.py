@@ -86,8 +86,8 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     success_heading_threshold = 0.75
     upright_dot_threshold = 0.4
     termination_height = 0.65  # [m]
-    target_radius_range = (0.5, 1.5)  # [m]
-    target_height_range = (1.0, 1.8)  # [m]
+    target_radius_range = (1, 3)  # [m]
+    target_height_range = (0.5, 1.2)  # [m]
     base_xy_range = (-0.25, 0.25)  # random XY shift per reset [m]
     base_yaw_range = (-0.5 * math.pi, 0.5 * math.pi)  # random heading offset [rad]
     base_lin_vel_range = (-0.2, 0.2)
@@ -101,7 +101,10 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     feet_air_time_threshold = 0.4
     feet_air_time_command_threshold = 0.1
     feet_slide_contact_threshold = 1.0
+    hand_pose_desired_dir = (0.0, 0.0, 1.0)
+    hand_pose_target_radius = 0.35
 
+    # positive task rewards / bonuses
     rew_scale_alive = 0.5
     rew_scale_hand_target = 16.0
     rew_scale_body_target = 1.0
@@ -109,19 +112,29 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     rew_scale_upright = 5
     rew_scale_target_velocity = 2.0
     rew_scale_feet_air_time = 0.25
-    rew_scale_feet_slide = -0.1
-    rew_scale_termination = -200.0
-    rew_scale_action_rate = -0.005
-    rew_scale_joint_vel = -0.001
-    rew_scale_flat_orientation = -0.1
-    rew_scale_joint_center = -0.01
-    rew_scale_action_smooth = -0.002
-    rew_scale_joint_hip = -0.1
-    rew_scale_joint_arms = -0.1
-    rew_scale_joint_fingers = -0.05
-    rew_scale_joint_torso = -0.1
-    rew_scale_ankle_limits = -1.0
+    rew_scale_hand_pose = 2.0
     success_bonus = 24.0
+
+    # contact-related penalties
+    rew_scale_feet_slide = -0.1
+    rew_scale_ankle_limits = -1.5
+    rew_scale_termination = -200.0
+
+    # action / velocity penalties
+    rew_scale_action_rate = -0.01
+    rew_scale_action_smooth = -0.003
+    rew_scale_joint_vel = -0.004
+    rew_scale_lin_vel_z = -0.2
+    rew_scale_dof_acc = -1.25e-7
+    rew_scale_dof_torque = -3.0e-7
+
+    # pose alignment & joint deviation penalties
+    rew_scale_flat_orientation = -0.1
+    rew_scale_joint_center = -0.02
+    rew_scale_joint_hip = -0.12
+    rew_scale_joint_arms = -0.15
+    rew_scale_joint_fingers = -0.08
+    rew_scale_joint_torso = -0.12
 
     def __post_init__(self):
         # keep render interval aligned with control frequency
