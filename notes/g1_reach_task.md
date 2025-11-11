@@ -46,8 +46,35 @@
       agent.save_interval=100 \
       --distributed
   ```
+  
   多节点时，把 `--standalone --nproc_per_node=2` 替换为  
   `--nnodes=<节点数> --nproc_per_node=<每节点GPU数> --node_rank=<编号> --rdzv_backend=c10d --rdzv_endpoint=<主节点IP:端口>`。
+- **继续训练（Resume）**  
+  从指定 checkpoint 继续训练：
+  ```bash
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+      --task Isaac-G1-Reach-Direct-v0 \
+      --num_envs 2048 \
+      --max_iterations 5000 \
+      --headless \
+      --resume \
+      --load_run <run-folder-name> \
+      --checkpoint <checkpoint-file>
+  ```
+  - `--resume`: 启用继续训练模式
+  - `--load_run`: 指定运行文件夹名称（如 `2025-11-10_12-53-53`）
+  - `--checkpoint`: 指定模型文件（如 `model_1500.pt`，可省略路径前缀）
+  
+  也可以直接指定完整的 checkpoint 路径：
+  ```bash
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+      --task Isaac-G1-Reach-Direct-v0 \
+      --num_envs 2048 \
+      --max_iterations 5000 \
+      --headless \
+      --resume \
+      --checkpoint logs/rsl_rl/g1_reach_direct/2025-11-10_12-53-53/model_1500.pt
+  ```
 - **RSL-RL 推理 & 录制视频（Play）**  
   1. 训练时需开启摄像机（`--enable_cameras`），并在环境中配置想要的视角/Follow 方式。  
   2. 推理/录制采用 `scripts/reinforcement_learning/rsl_rl/play.py`，常用命令：  
@@ -58,7 +85,7 @@
          --headless \
          --enable_cameras \
          --video \
-         --video_length 1000 \
-         --checkpoint logs/rsl_rl/g1_reach_direct/labserver_models/model_200.pt
+         --video_length 500 \
+         --checkpoint <ckpt-path>
      ```
      这会加载指定 checkpoint，使用训练时保存的摄像机设置并在 `logs/rsl_rl/g1_reach_direct/<run>/videos/play/` 下生成 MP4。若想实时查看，可把 `--headless` 去掉并在 GUI 里调节相机。*** End Patch
