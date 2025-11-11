@@ -119,7 +119,7 @@ class G1ReachEnvCfg(DirectRLEnvCfg):
     rew_scale_facing = 0.5
     rew_scale_upright = 0.5
     rew_scale_target_velocity = 5
-    rew_scale_feet_air_time = 6
+    rew_scale_feet_air_time = 30
     rew_scale_hand_pose = 2.0
     rew_scale_torso_upright = -0.2
     success_bonus = 10
