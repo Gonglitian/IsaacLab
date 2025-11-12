@@ -6,6 +6,7 @@
     agent.num_steps_per_env=128 \
     agent.algorithm.num_mini_batches=80000 \
     agent.algorithm.learning_rate=5.0e-2 \
+    agent.algorithm.num_learning_epochs=20
 
 
 # RESUME
